@@ -1,0 +1,5 @@
+{
+  "name": "n8n-ia",
+  "private": true,
+  "scripts": { "test": "node --test tests/logic.test.js", "build": "python3 build_workflows.py" }
+}

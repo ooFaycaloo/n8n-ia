@@ -1,0 +1,468 @@
+{
+  "name": "Tri des emails clients et brouillons de réponse",
+  "nodes": [
+    {
+      "id": "6b997cf8-7cdc-51a6-8f83-ce380ce6b26b",
+      "name": "Mode d'emploi",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -520
+      ],
+      "parameters": {
+        "content": "## Tri des emails clients\nChaque nouvel email non lu est classé par Claude, étiqueté dans Gmail. Les réclamations et demandes de support reçoivent un **brouillon** de réponse : rien n'est envoyé sans relecture.\n\n**À configurer**\n1. Identifiants Gmail (OAuth2) et Anthropic.\n2. Nœud *Paramètres* : nom de l'entreprise, ton, signature.\n3. Dans chaque nœud *Étiquette*, choisir le libellé Gmail.\n4. Nœud *Alerte Slack* : canal des réclamations.\n\nCoût indicatif : moins de 0,50 € pour 1 000 emails (Claude Haiku 5.5).",
+        "width": 480,
+        "height": 360,
+        "color": 7
+      }
+    },
+    {
+      "id": "3e58e92f-a0df-572f-9118-59aa09cb3f6d",
+      "name": "Nouvel email",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "readStatus": "unread",
+          "q": "-category:promotions -category:social -from:me"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "6ba5ba39-4019-5c11-b8ca-c9565c3c7c45",
+      "name": "Paramètres",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c82d3716-1ac0-54db-b703-bcf733d0cf96",
+              "name": "entreprise",
+              "value": "Corvelle Énergies",
+              "type": "string"
+            },
+            {
+              "id": "e2378fd8-b2e5-53bf-a7f6-f99397b4647e",
+              "name": "ton",
+              "value": "cordial, précis, vouvoiement",
+              "type": "string"
+            },
+            {
+              "id": "f4e3cbba-6259-5d40-b1a2-7463e20f0ce7",
+              "name": "signature",
+              "value": "Le service client de Corvelle Énergies",
+              "type": "string"
+            },
+            {
+              "id": "b5f04282-fa79-54f5-a496-0a33568c819a",
+              "name": "regles_reponse",
+              "value": "Ne jamais promettre de remboursement, de délai ni de geste commercial : proposer un rappel par un conseiller.",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "82201850-269c-585b-9a23-1b4b37dcbc5c",
+      "name": "Classer l'email",
+      "type": "@n8n/n8n-nodes-langchain.textClassifier",
+      "typeVersion": 1.1,
+      "position": [
+        460,
+        0
+      ],
+      "parameters": {
+        "inputText": "=Objet : {{ $json.subject }}\nDe : {{ $json.from.text }}\n\n{{ ($json.text || '').slice(0, 4000) }}",
+        "categories": {
+          "categories": [
+            {
+              "category": "Devis ou commande",
+              "description": "Demande de prix, de devis, de disponibilité ou passage de commande"
+            },
+            {
+              "category": "Réclamation",
+              "description": "Mécontentement, litige, produit défectueux, retard, demande de remboursement"
+            },
+            {
+              "category": "Facture ou comptabilité",
+              "description": "Facture, relance de paiement, avoir, question comptable"
+            },
+            {
+              "category": "Support technique",
+              "description": "Problème d'utilisation, panne, question technique sur un produit ou service"
+            },
+            {
+              "category": "Prospection ou spam",
+              "description": "Démarchage commercial, newsletter, message automatique, spam"
+            }
+          ]
+        },
+        "options": {
+          "fallback": "other",
+          "systemPromptTemplate": "Classe l'email d'un client dans l'une des catégories suivantes : {categories}. Suis les instructions de format ci-dessous. N'explique pas, réponds uniquement en JSON."
+        }
+      }
+    },
+    {
+      "id": "e8b30656-3b2e-5413-99b1-540bb12d0f25",
+      "name": "Claude (classement)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.6,
+      "position": [
+        460,
+        220
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "claude-haiku-5-5"
+        },
+        "options": {
+          "maxTokensToSample": 256,
+          "temperature": 0
+        }
+      }
+    },
+    {
+      "id": "625ca388-6c39-5af6-b937-03c81b56167b",
+      "name": "Étiquette devis ou commande",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        820,
+        -480
+      ],
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $('Nouvel email').item.json.id }}",
+        "labelIds": []
+      }
+    },
+    {
+      "id": "3c874091-d2c1-5f2d-a3e8-e48e6b54a1fc",
+      "name": "Étiquette réclamation",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        820,
+        -290
+      ],
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $('Nouvel email').item.json.id }}",
+        "labelIds": []
+      }
+    },
+    {
+      "id": "645d98fd-45d4-5855-826b-172e0eda5bb3",
+      "name": "Étiquette facture ou comptabilité",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        820,
+        -100
+      ],
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $('Nouvel email').item.json.id }}",
+        "labelIds": []
+      }
+    },
+    {
+      "id": "62eb654d-8189-5cbf-b2cb-f79ca144303c",
+      "name": "Étiquette support technique",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        820,
+        90
+      ],
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $('Nouvel email').item.json.id }}",
+        "labelIds": []
+      }
+    },
+    {
+      "id": "f3ebbf87-9c8c-5a10-8331-cf99d7ae7303",
+      "name": "Étiquette prospection ou spam",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        820,
+        280
+      ],
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $('Nouvel email').item.json.id }}",
+        "labelIds": []
+      }
+    },
+    {
+      "id": "d91b0f94-bd50-5175-93fc-2316b4575aac",
+      "name": "Étiquette autre",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        820,
+        470
+      ],
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $('Nouvel email').item.json.id }}",
+        "labelIds": []
+      }
+    },
+    {
+      "id": "3b508a3a-b3c4-53cb-bb50-2dabada6633a",
+      "name": "Rédiger le brouillon",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.7,
+      "position": [
+        1160,
+        -100
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "=Email reçu\nObjet : {{ $('Nouvel email').item.json.subject }}\nDe : {{ $('Nouvel email').item.json.from.text }}\n\n{{ ($('Nouvel email').item.json.text || '').slice(0, 6000) }}",
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "=Tu rédiges des brouillons de réponse pour {{ $('Paramètres').item.json.entreprise }}, relus par un humain avant envoi. Ton : {{ $('Paramètres').item.json.ton }}. Réponds dans la langue du client, en 120 mots maximum, sans objet ni formule d'en-tête inventée. {{ $('Paramètres').item.json.regles_reponse }} Si une information manque pour répondre, pose une seule question précise. Termine par la signature : {{ $('Paramètres').item.json.signature }}"
+            }
+          ]
+        },
+        "batching": {}
+      }
+    },
+    {
+      "id": "b722d951-b198-5d48-8c68-a7c3d45f9e90",
+      "name": "Claude (brouillon)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.6,
+      "position": [
+        1160,
+        120
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "claude-haiku-5-5"
+        },
+        "options": {
+          "maxTokensToSample": 600,
+          "temperature": 0
+        }
+      }
+    },
+    {
+      "id": "f7319339-bbcc-5a3b-b82d-736881b37c27",
+      "name": "Créer le brouillon Gmail",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1460,
+        -100
+      ],
+      "parameters": {
+        "resource": "draft",
+        "subject": "=Re: {{ $('Nouvel email').item.json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.text }}",
+        "options": {
+          "threadId": "={{ $('Nouvel email').item.json.threadId }}",
+          "sendTo": "={{ $('Nouvel email').item.json.from.value[0].address }}"
+        }
+      }
+    },
+    {
+      "id": "cae3a5d8-3fd1-524d-8e1a-14b1b8ddfa6c",
+      "name": "Alerte Slack réclamation",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1160,
+        -340
+      ],
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#service-client"
+        },
+        "text": "=:rotating_light: Réclamation de {{ $('Nouvel email').item.json.from.text }} : « {{ $('Nouvel email').item.json.subject }} ». Brouillon de réponse prêt dans Gmail.",
+        "otherOptions": {}
+      }
+    }
+  ],
+  "connections": {
+    "Nouvel email": {
+      "main": [
+        [
+          {
+            "node": "Paramètres",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Paramètres": {
+      "main": [
+        [
+          {
+            "node": "Classer l'email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude (classement)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Classer l'email",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classer l'email": {
+      "main": [
+        [
+          {
+            "node": "Étiquette devis ou commande",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Étiquette réclamation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Étiquette facture ou comptabilité",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Étiquette support technique",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Étiquette prospection ou spam",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Étiquette autre",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Étiquette réclamation": {
+      "main": [
+        [
+          {
+            "node": "Rédiger le brouillon",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Alerte Slack réclamation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Étiquette support technique": {
+      "main": [
+        [
+          {
+            "node": "Rédiger le brouillon",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude (brouillon)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Rédiger le brouillon",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rédiger le brouillon": {
+      "main": [
+        [
+          {
+            "node": "Créer le brouillon Gmail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Paris"
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "name": "IA"
+    },
+    {
+      "name": "email"
+    }
+  ]
+}

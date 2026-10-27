@@ -1,0 +1,381 @@
+{
+  "name": "Factures fournisseurs reçues par email, contrôlées",
+  "nodes": [
+    {
+      "id": "7e10c6d3-cf29-5a7f-9a53-ce0a33b4ece5",
+      "name": "Mode d'emploi",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -440
+      ],
+      "parameters": {
+        "content": "## Factures fournisseurs contrôlées\nChaque PDF reçu par email est lu par Claude, contrôlé (SIREN, IBAN, totaux, délai légal de 60 jours, doublon, **changement d'IBAN par rapport à l'historique**) puis ajouté au tableau de suivi. Les factures suspectes sont signalées à la comptabilité.\n\n**À configurer**\n1. Identifiants Gmail, Google Sheets et Anthropic.\n2. Créer un Google Sheet avec un onglet *Factures* (la première ligne d'en-têtes est créée automatiquement).\n3. Coller son URL dans les deux nœuds Google Sheets.\n4. Nœud *Paramètres* : adresse de la comptabilité.\n\nAucun paiement n'est déclenché : le workflow signale, la comptabilité décide.",
+        "width": 500,
+        "height": 380,
+        "color": 7
+      }
+    },
+    {
+      "id": "35290103-fa31-51de-ab68-f84e3d7be211",
+      "name": "Email avec facture",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 10,
+              "unit": "minutes"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "readStatus": "unread",
+          "q": "has:attachment filename:pdf (facture OR invoice)"
+        },
+        "options": {
+          "downloadAttachments": true
+        }
+      }
+    },
+    {
+      "id": "712a2143-0147-5886-9a5b-81144dda0bc2",
+      "name": "Paramètres",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1dc0743f-8110-5d23-9e7a-b23b0e6c16d5",
+              "name": "email_comptabilite",
+              "value": "comptabilite@exemple.fr",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "2a8d6ad2-3a7c-5303-9778-f1f1adef1496",
+      "name": "Une facture par élément",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Une facture par élément : chaque pièce jointe PDF du courriel devient un élément séparé,\n// avec les informations du courriel d'origine (expéditeur, objet, identifiant).\n\nfunction main(items) {\n  const out = [];\n  for (const item of items) {\n    const mail = item.json;\n    const from = mail.from && mail.from.value && mail.from.value[0] ? mail.from.value[0].address : (mail.from || '');\n    for (const [key, file] of Object.entries(item.binary || {})) {\n      const isPdf = (file.mimeType || '').includes('pdf') || /\\.pdf$/i.test(file.fileName || '');\n      if (!isPdf) continue;\n      out.push({\n        json: { from, subject: mail.subject || '', messageId: mail.id || '', fileName: file.fileName || key },\n        binary: { data: file },\n      });\n    }\n  }\n  return out;\n}\n\n\nreturn main($input.all());\n"
+      }
+    },
+    {
+      "id": "f665f685-309a-5b3b-a791-e4f9482b678a",
+      "name": "Lire le PDF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "data",
+        "options": {}
+      }
+    },
+    {
+      "id": "5758a026-8ec3-54b3-ad8b-9f45dc3e0459",
+      "name": "Extraction IA",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "text": "={{ $json.text.slice(0, 15000) }}",
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"fournisseur\": {\n      \"type\": \"string\",\n      \"description\": \"Raison sociale du vendeur (émetteur de la facture)\"\n    },\n    \"siren\": {\n      \"type\": \"string\",\n      \"description\": \"SIREN du vendeur : 9 chiffres, ou les 9 premiers chiffres du SIRET\"\n    },\n    \"numero_facture\": {\n      \"type\": \"string\"\n    },\n    \"date_facture\": {\n      \"type\": \"string\",\n      \"description\": \"Date d'émission au format AAAA-MM-JJ\"\n    },\n    \"date_echeance\": {\n      \"type\": \"string\",\n      \"description\": \"Date d'échéance au format AAAA-MM-JJ, vide si absente\"\n    },\n    \"montant_ht\": {\n      \"type\": \"number\"\n    },\n    \"montant_tva\": {\n      \"type\": \"number\"\n    },\n    \"montant_ttc\": {\n      \"type\": \"number\"\n    },\n    \"iban\": {\n      \"type\": \"string\",\n      \"description\": \"IBAN du vendeur pour le paiement, vide si absent\"\n    }\n  },\n  \"required\": [\n    \"fournisseur\",\n    \"numero_facture\",\n    \"date_facture\",\n    \"montant_ttc\"\n  ]\n}",
+        "options": {
+          "systemPromptTemplate": "Tu extrais les champs d'une facture française. Recopie exactement ce qui est écrit, n'invente rien et laisse vide un champ absent. Les montants sont des nombres (point décimal)."
+        }
+      }
+    },
+    {
+      "id": "acf54f19-daeb-56f8-af9e-9462aac6d567",
+      "name": "Claude (extraction)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.6,
+      "position": [
+        880,
+        220
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "claude-haiku-5-5"
+        },
+        "options": {
+          "maxTokensToSample": 800,
+          "temperature": 0
+        }
+      }
+    },
+    {
+      "id": "b11b9fd6-30ff-5708-8a5c-b0ad85859910",
+      "name": "Lire l'historique",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1160,
+        0
+      ],
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "url",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Factures"
+        },
+        "options": {}
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "45f21412-54ac-5f1d-9bd4-0c45b0a932ab",
+      "name": "Contrôles",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1380,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Contrôles d'une facture extraite par l'IA, avant enregistrement dans le tableau de suivi.\n// Entrée : sorties du nœud d'extraction ({ output: { fournisseur, siren, numero_facture, ... } }).\n// Contexte : history = lignes déjà présentes dans le tableau ;\n//            mails = métadonnées du courriel source de chaque facture (même ordre que les entrées).\n\nfunction digits(s) { return String(s ?? '').replace(/\\D/g, ''); }\n\nfunction isValidSiren(s) {\n  const d = digits(s);\n  if (d.length !== 9) return false;\n  let sum = 0;\n  for (let i = 0; i < 9; i++) {\n    let n = Number(d[8 - i]);\n    if (i % 2 === 1) { n *= 2; if (n > 9) n -= 9; }\n    sum += n;\n  }\n  return sum % 10 === 0;\n}\n\nfunction normalizeIban(s) { return String(s ?? '').replace(/\\s+/g, '').toUpperCase(); }\n\nfunction isValidIban(s) {\n  const iban = normalizeIban(s);\n  if (!/^[A-Z]{2}\\d{2}[A-Z0-9]{10,30}$/.test(iban)) return false;\n  const rearranged = iban.slice(4) + iban.slice(0, 4);\n  const numeric = rearranged.replace(/[A-Z]/g, c => String(c.charCodeAt(0) - 55));\n  return BigInt(numeric) % 97n === 1n;\n}\n\nfunction toNumber(v) {\n  if (typeof v === 'number') return v;\n  const s = String(v ?? '').replace(/[\\s  €]/g, '');\n  if (!s) return NaN;\n  const normalized = s.includes(',') && s.lastIndexOf(',') > s.lastIndexOf('.')\n    ? s.replace(/\\./g, '').replace(',', '.') : s.replace(/,/g, '');\n  return Number(normalized);\n}\n\nfunction daysBetween(a, b) { return Math.round((new Date(b) - new Date(a)) / 86400000); }\n\nfunction check(inv, history) {\n  const issues = [];\n  const ht = toNumber(inv.montant_ht), tva = toNumber(inv.montant_tva), ttc = toNumber(inv.montant_ttc);\n  if ([ht, tva, ttc].some(Number.isNaN)) issues.push('Montants illisibles');\n  else if (Math.abs(ht + tva - ttc) > 0.02) issues.push(`HT + TVA ≠ TTC (${ht} + ${tva} ≠ ${ttc})`);\n  if (!inv.siren) issues.push('SIREN absent');\n  else if (!isValidSiren(inv.siren)) issues.push(`SIREN invalide (${inv.siren})`);\n  if (inv.iban && !isValidIban(inv.iban)) issues.push('IBAN invalide');\n  if (inv.date_echeance && inv.date_facture) {\n    const d = daysBetween(inv.date_facture, inv.date_echeance);\n    if (d < 0) issues.push('Échéance antérieure à la date de facture');\n    else if (d > 60) issues.push(`Délai de paiement de ${d} jours (> 60 jours légaux)`);\n  }\n  const sameSupplier = history.filter(h => (inv.siren && digits(h.siren) === digits(inv.siren))\n    || (h.fournisseur && String(h.fournisseur).toLowerCase() === String(inv.fournisseur ?? '').toLowerCase()));\n  if (sameSupplier.some(h => String(h.numero_facture) === String(inv.numero_facture))) {\n    issues.push('Doublon : facture déjà enregistrée');\n  }\n  const knownIbans = new Set(sameSupplier.map(h => normalizeIban(h.iban)).filter(Boolean));\n  if (inv.iban && knownIbans.size && !knownIbans.has(normalizeIban(inv.iban))) {\n    issues.push('IBAN différent de celui connu pour ce fournisseur : vérifier par téléphone avant tout paiement');\n  }\n  return issues;\n}\n\nfunction main(items, ctx) {\n  const history = (ctx.history || []).map(h => h.json || h);\n  return items.map((it, idx) => {\n    const mail = ((ctx.mails || [])[idx] || {}).json || {};\n    const inv = it.json.output || it.json;\n    const issues = check(inv, history);\n    const blocking = issues.some(i => /IBAN|Doublon|SIREN invalide|≠/.test(i));\n    const row = {\n      recu_le: new Date().toISOString().slice(0, 10),\n      fournisseur: inv.fournisseur || '',\n      siren: digits(inv.siren),\n      numero_facture: inv.numero_facture || '',\n      date_facture: inv.date_facture || '',\n      date_echeance: inv.date_echeance || '',\n      montant_ht: toNumber(inv.montant_ht),\n      montant_tva: toNumber(inv.montant_tva),\n      montant_ttc: toNumber(inv.montant_ttc),\n      iban: normalizeIban(inv.iban),\n      statut: blocking ? 'À BLOQUER' : issues.length ? 'À vérifier' : 'OK',\n      anomalies: issues.join(' | '),\n      expediteur: mail.from || '',\n      objet_mail: mail.subject || '',\n      fichier: mail.fileName || '',\n    };\n    history.push(row); // deux factures du même courriel se contrôlent aussi entre elles\n    return { json: row };\n  });\n}\n\n\nreturn main($('Extraction IA').all(), {\n  history: $('Lire l\\'historique').all().filter(i => i.json && i.json.numero_facture),\n  mails: $('Une facture par élément').all(),\n});\n"
+      }
+    },
+    {
+      "id": "47e5ac7a-ee2d-541c-9af1-9b53f843e842",
+      "name": "Ajouter au suivi",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1600,
+        -100
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "url",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Factures"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "d891f76c-2e5f-5c47-9cc0-febea37ab44a",
+      "name": "Anomalie ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1600,
+        120
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b61c3c8d-7a02-52ac-8931-5c3ef2bb1983",
+              "leftValue": "={{ $json.statut }}",
+              "rightValue": "OK",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "413f6424-406a-5f43-93ca-d879496a9d24",
+      "name": "Alerter la comptabilité",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1820,
+        100
+      ],
+      "parameters": {
+        "sendTo": "={{ $('Paramètres').first().json.email_comptabilite }}",
+        "subject": "={{ $json.statut }} : facture {{ $json.numero_facture }} de {{ $json.fournisseur }}",
+        "message": "=<p>La facture <b>{{ $json.numero_facture }}</b> de <b>{{ $json.fournisseur }}</b> ({{ $json.montant_ttc }} € TTC) nécessite une vérification :</p><p>{{ $json.anomalies.split(' | ').join('<br>') }}</p><p>Fichier : {{ $json.fichier }} · reçu de {{ $json.expediteur }}</p>",
+        "options": {
+          "appendAttribution": false
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Claude (extraction)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Extraction IA",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email avec facture": {
+      "main": [
+        [
+          {
+            "node": "Paramètres",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Paramètres": {
+      "main": [
+        [
+          {
+            "node": "Une facture par élément",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Une facture par élément": {
+      "main": [
+        [
+          {
+            "node": "Lire le PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire le PDF": {
+      "main": [
+        [
+          {
+            "node": "Extraction IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraction IA": {
+      "main": [
+        [
+          {
+            "node": "Lire l'historique",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire l'historique": {
+      "main": [
+        [
+          {
+            "node": "Contrôles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contrôles": {
+      "main": [
+        [
+          {
+            "node": "Ajouter au suivi",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Anomalie ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anomalie ?": {
+      "main": [
+        [
+          {
+            "node": "Alerter la comptabilité",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Paris"
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "name": "IA"
+    },
+    {
+      "name": "comptabilité"
+    }
+  ]
+}

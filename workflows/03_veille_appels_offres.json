@@ -1,0 +1,389 @@
+{
+  "name": "Veille appels d'offres BOAMP qualifiée par IA",
+  "nodes": [
+    {
+      "id": "3d910f1e-b238-501c-9716-3fd901ba90e7",
+      "name": "Mode d'emploi",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -440
+      ],
+      "parameters": {
+        "content": "## Veille appels d'offres\nChaque matin de semaine, les avis publiés la veille au BOAMP (API ouverte, sans clé) sont filtrés par mots-clés et départements, notés par Claude selon le profil de l'entreprise, enregistrés dans Google Sheets et envoyés par email.\n\n**À configurer**\n1. Identifiants Gmail, Google Sheets et Anthropic.\n2. Nœud *Paramètres* : profil de l'entreprise, mots-clés, départements, seuil, destinataires.\n3. Google Sheet avec un onglet *Appels d'offres* (colonne *idweb* pour le dédoublonnage).\n\nLe plafond *max_avis* limite le nombre d'avis envoyés à l'IA chaque jour, donc le coût.",
+        "width": 500,
+        "height": 380,
+        "color": 7
+      }
+    },
+    {
+      "id": "d33a50cf-6e3a-572d-b724-28854626f209",
+      "name": "Chaque matin",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 30 7 * * 1-5"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "bda0bc51-8264-5dc8-a287-7f80e1ba2b44",
+      "name": "Paramètres",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "d3b381b1-e021-578f-9156-dc6f638553cc",
+              "name": "profil_entreprise",
+              "value": "Bureau d'études de 25 personnes à Lyon spécialisé en infrastructures de recharge pour véhicules électriques : études, installation, supervision et maintenance. Marchés visés : 20 000 à 500 000 €, Auvergne-Rhône-Alpes et Île-de-France.",
+              "type": "string"
+            },
+            {
+              "id": "8e63f061-b2e0-59aa-a7ae-77d8e71280c7",
+              "name": "mots_cles",
+              "value": "borne, recharge, IRVE, véhicule électrique, mobilité électrique, supervision, éclairage public",
+              "type": "string"
+            },
+            {
+              "id": "0633e43b-df49-58c3-9e62-41dbc180cb74",
+              "name": "departements",
+              "value": "69, 01, 38, 42, 73, 74, 75, 92, 93, 94",
+              "type": "string"
+            },
+            {
+              "id": "facf1a73-a992-583f-9056-e548f6d5cb6b",
+              "name": "score_minimum",
+              "value": 60,
+              "type": "number"
+            },
+            {
+              "id": "86e0387f-b0cf-5ab4-89db-a7fcc926d7d1",
+              "name": "max_avis",
+              "value": 40,
+              "type": "number"
+            },
+            {
+              "id": "04bd332c-7eca-5325-97b8-8ecc166afb5d",
+              "name": "destinataires",
+              "value": "commercial@exemple.fr",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "2bd29f91-4c8d-52a5-be3d-2b25b6d69268",
+      "name": "Avis BOAMP de la veille",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "url": "https://boamp-datadila.opendatasoft.com/api/explore/v2.1/catalog/datasets/boamp/records",
+        "sendQuery": true,
+        "specifyQuery": "keypair",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "where",
+              "value": "=dateparution >= date'{{ $now.minus({ days: $now.weekday === 1 ? 3 : 1 }).toFormat('yyyy-MM-dd') }}'"
+            },
+            {
+              "name": "order_by",
+              "value": "idweb"
+            },
+            {
+              "name": "limit",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "offset",
+                    "value": "={{ $pageCount * 100 }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ $response.body.results.length < 100 }}",
+              "limitPagesFetched": true,
+              "maxRequests": 20
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "31b1837a-5505-5272-93f2-560d150b941f",
+      "name": "Préfiltrage",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Préfiltrage des avis BOAMP avant l'IA : on n'envoie au modèle que des avis plausibles,\n// pour garder un coût par jour prévisible (plafond `max_avis`).\n// Entrée : réponses de l'API BOAMP (une ou plusieurs pages { total_count, results }).\n// Contexte : params = nœud « Paramètres » (mots_cles, departements, max_avis).\n\nfunction fold(s) {\n  return String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');\n}\n\nfunction asList(v) {\n  if (v == null || v === '') return [];\n  return Array.isArray(v) ? v.map(String) : String(v).split(/[,;]\\s*/).filter(Boolean);\n}\n\nfunction isNewTender(r) {\n  // avis de marché initiaux (pas les attributions ni les rectificatifs)\n  const label = fold(r.nature_libelle || r.nature || '');\n  if (!label) return true;\n  return !label.includes('attribution') && !label.includes('rectificatif') && !label.includes('annulation');\n}\n\nfunction main(items, ctx) {\n  const p = ctx.params || {};\n  const keywords = asList(p.mots_cles).map(fold);\n  const departments = asList(p.departements);\n  const maxNotices = Number(p.max_avis || 40);\n\n  const seen = new Set();\n  const kept = [];\n  for (const page of items) {\n    for (const r of page.json.results || []) {\n      if (!r.idweb || seen.has(r.idweb) || !isNewTender(r)) continue;\n      seen.add(r.idweb);\n      const deps = asList(r.code_departement);\n      if (departments.length && !deps.some(d => departments.includes(d))) continue;\n      const text = fold([r.objet, asList(r.descripteur_libelle).join(' ')].join(' '));\n      const matched = keywords.filter(k => text.includes(k));\n      if (keywords.length && !matched.length) continue;\n      kept.push({\n        idweb: r.idweb,\n        objet: r.objet || '',\n        acheteur: r.nomacheteur || '',\n        departements: deps.join(', '),\n        descripteurs: asList(r.descripteur_libelle).join(', '),\n        type_marche: asList(r.type_marche).join(', '),\n        date_parution: r.dateparution || '',\n        date_limite: r.datelimitereponse || '',\n        url: r.url_avis || `https://www.boamp.fr/pages/avis/?q=idweb:${r.idweb}`,\n        mots_cles_trouves: matched.join(', '),\n      });\n    }\n  }\n  // les avis qui contiennent le plus de mots-clés passent en premier si on dépasse le plafond\n  kept.sort((a, b) => b.mots_cles_trouves.split(',').length - a.mots_cles_trouves.split(',').length);\n  return kept.slice(0, maxNotices).map(json => ({ json }));\n}\n\n\nreturn main($input.all(), { params: $('Paramètres').first().json });\n"
+      }
+    },
+    {
+      "id": "54aff9b7-5811-550b-8821-6546b1c1f3be",
+      "name": "Notation IA",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "text": "=Avis : {{ $json.objet }}\nAcheteur : {{ $json.acheteur }}\nDépartements : {{ $json.departements }}\nDescripteurs : {{ $json.descripteurs }}\nType de marché : {{ $json.type_marche }}\nDate limite : {{ $json.date_limite }}",
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"score\": {\n      \"type\": \"number\",\n      \"description\": \"Pertinence de 0 à 100 pour l'entreprise\"\n    },\n    \"raison\": {\n      \"type\": \"string\",\n      \"description\": \"Justification en 25 mots maximum\"\n    },\n    \"type_prestation\": {\n      \"type\": \"string\",\n      \"description\": \"Nature de la prestation demandée, en quelques mots\"\n    }\n  },\n  \"required\": [\n    \"score\",\n    \"raison\"\n  ]\n}",
+        "options": {
+          "systemPromptTemplate": "=Tu qualifies des appels d'offres publics pour l'entreprise suivante : {{ $('Paramètres').first().json.profil_entreprise }}\nNote la pertinence de 0 (hors sujet) à 100 (cœur de métier, zone et taille adaptées). Sois sévère : un avis seulement voisin du métier ne dépasse pas 50.",
+          "batching": {
+            "batchSize": 5,
+            "delayBetweenBatches": 0
+          }
+        }
+      }
+    },
+    {
+      "id": "29c8f0e7-c8bb-5662-a976-edbe366dd014",
+      "name": "Claude (notation)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.6,
+      "position": [
+        880,
+        220
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "claude-haiku-5-5"
+        },
+        "options": {
+          "maxTokensToSample": 300,
+          "temperature": 0
+        }
+      }
+    },
+    {
+      "id": "1489c08d-48c3-5320-9223-b69e69b9df8b",
+      "name": "Synthèse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Fusionne les avis préfiltrés avec la note donnée par l'IA, garde les avis pertinents\n// et prépare le courriel de synthèse quotidien.\n// Entrée : sorties du nœud d'extraction IA ({ output: { score, raison, type_prestation } }), dans le même ordre.\n// Contexte : notices = sorties du préfiltrage ; params = nœud « Paramètres » (score_minimum).\n\nfunction esc(s) {\n  return String(s ?? '').replace(/[&<>\"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[c]));\n}\n\nfunction main(items, ctx) {\n  const notices = ctx.notices || [];\n  const minScore = Number((ctx.params || {}).score_minimum ?? 60);\n  const rows = items.map((it, i) => {\n    const o = it.json.output || it.json || {};\n    return { ...notices[i].json, score: Math.round(Number(o.score) || 0), raison: o.raison || '',\n             type_prestation: o.type_prestation || '' };\n  });\n  const retained = rows.filter(r => r.score >= minScore).sort((a, b) => b.score - a.score);\n\n  const date = new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });\n  const cards = retained.map(r => `\n    <tr><td style=\"padding:14px 0;border-bottom:1px solid #e5e7eb\">\n      <div style=\"font:600 15px Arial,sans-serif;color:#111827\">${esc(r.objet)}</div>\n      <div style=\"font:13px Arial,sans-serif;color:#4b5563;margin-top:2px\">${esc(r.acheteur)} · dép. ${esc(r.departements)} · réponse avant le ${esc(r.date_limite || 'non précisé')}</div>\n      <div style=\"font:13px Arial,sans-serif;color:#111827;margin-top:6px\"><b>Pertinence ${r.score}/100</b> — ${esc(r.raison)}</div>\n      <a href=\"${esc(r.url)}\" style=\"font:13px Arial,sans-serif;color:#0d6a73\">Lire l'avis sur le BOAMP</a>\n    </td></tr>`).join('');\n  const html = `<div style=\"max-width:640px\">\n    <p style=\"font:15px Arial,sans-serif;color:#111827\">${retained.length} appel(s) d'offres pertinent(s) sur ${rows.length} avis analysés.</p>\n    <table style=\"width:100%;border-collapse:collapse\">${cards || '<tr><td style=\"font:14px Arial,sans-serif\">Aucun avis au-dessus du seuil aujourd\\'hui.</td></tr>'}</table>\n    <p style=\"font:12px Arial,sans-serif;color:#6b7280\">Note de pertinence calculée par IA à partir du profil de l'entreprise : à vérifier avant toute décision de réponse.</p></div>`;\n\n  return [{ json: {\n    subject: `Veille appels d'offres — ${retained.length} avis pertinent(s) — ${date}`,\n    html,\n    count: retained.length,\n    analysed: rows.length,\n    rows: retained,\n  } }];\n}\n\n\nreturn main($input.all(), { notices: $('Préfiltrage').all(), params: $('Paramètres').first().json });\n"
+      }
+    },
+    {
+      "id": "ab5b8a92-a965-5eb6-a110-ac08af650adf",
+      "name": "Envoyer la synthèse",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1400,
+        -100
+      ],
+      "parameters": {
+        "sendTo": "={{ $('Paramètres').first().json.destinataires }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      }
+    },
+    {
+      "id": "b44e7364-6bc3-5df5-a311-e753989b97c1",
+      "name": "Un avis par ligne",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        120
+      ],
+      "parameters": {
+        "fieldToSplitOut": "rows",
+        "include": "noOtherFields",
+        "options": {}
+      }
+    },
+    {
+      "id": "69d15aa2-57a9-5c7f-8fe9-6795df6970d0",
+      "name": "Enregistrer les avis",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1620,
+        120
+      ],
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "mode": "url",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Appels d'offres"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "idweb"
+          ],
+          "schema": []
+        },
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Claude (notation)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Notation IA",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chaque matin": {
+      "main": [
+        [
+          {
+            "node": "Paramètres",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Paramètres": {
+      "main": [
+        [
+          {
+            "node": "Avis BOAMP de la veille",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Avis BOAMP de la veille": {
+      "main": [
+        [
+          {
+            "node": "Préfiltrage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préfiltrage": {
+      "main": [
+        [
+          {
+            "node": "Notation IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notation IA": {
+      "main": [
+        [
+          {
+            "node": "Synthèse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Synthèse": {
+      "main": [
+        [
+          {
+            "node": "Envoyer la synthèse",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Un avis par ligne",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Un avis par ligne": {
+      "main": [
+        [
+          {
+            "node": "Enregistrer les avis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Paris"
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "name": "IA"
+    },
+    {
+      "name": "commercial"
+    }
+  ]
+}
